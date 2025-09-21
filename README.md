@@ -16,7 +16,7 @@
 
 ```bash
 # 下载安装器
-wget -O qinglong_venv_installer.sh https://raw.githubusercontent.com/.../qinglong_venv_installer.sh
+wget -O qinglong_venv_installer.sh https://raw.githubusercontent.com/linweifu/qinglong-venv-manager/main/qinglong_venv_installer.sh
 
 # 🎯 一键安装（推荐）
 bash qinglong_venv_installer.sh
@@ -51,21 +51,12 @@ python3 /ql/scripts/qinglong_venv_manager.py remove <项目名>
 | `qinglong_venv_installer.sh` | 🚀 一键安装器 | 唯一安装入口，包含所有功能 |
 | `qinglong_venv_manager.py` | 🔧 虚拟环境管理器 | 创建、管理虚拟环境 |
 | `env-to-json.py` | 🔄 环境变量转换工具 | 将 .env 文件转换为 JSON |
-| `COMPLETE_SOLUTION_GUIDE.md` | 📖 完整技术文档 | 详细的实施指南和技术原理 |
 
 ## 🎯 工作原理
 
 1. **Shell 脚本补丁** - 修改 `/ql/shell/update.sh`，在订阅更新后自动创建虚拟环境
 2. **sitecustomize.py 补丁** - 修改 Python 启动脚本，自动激活虚拟环境
 3. **智能检测** - 自动识别 Python/Node.js 项目并安装对应依赖
-
-## 📖 详细文档
-
-查看 [完整解决方案指南](COMPLETE_SOLUTION_GUIDE.md) 了解：
-- 详细的技术原理
-- 完整的实施步骤
-- 故障排除指南
-- 最佳实践建议
 
 ## 🛠️ 系统要求
 
