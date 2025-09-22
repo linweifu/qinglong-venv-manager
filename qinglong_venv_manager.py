@@ -32,13 +32,18 @@ class Colors:
 class QingLongVenvManager:
     """青龙虚拟环境管理器"""
     
-    def __init__(self):
+    def __init__(self, debug: bool = False):
         self.scripts_dir = "/ql/data/scripts"
         self.repo_dir = "/ql/data/repo"
         self.log_dir = "/ql/data/log"
+        self.debug = debug
         
     def log(self, message: str, level: str = "INFO"):
         """带颜色的日志输出"""
+        # 如果是 DEBUG 级别且未开启调试模式，则不输出
+        if level == "DEBUG" and not self.debug:
+            return
+            
         timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
         
         color_map = {
@@ -64,23 +69,26 @@ class QingLongVenvManager:
     
     def get_dependency_hashes(self, project_dir: Path, repo_project_dir: Path) -> Dict[str, str]:
         """获取所有依赖文件的哈希值"""
-        dependency_files = [
-            project_dir / "requirements.txt",
-            repo_project_dir / "requirements.txt",
-            project_dir / "pyproject.toml",
-            repo_project_dir / "pyproject.toml",
-            project_dir / "package.json",
-            repo_project_dir / "package.json",
-            project_dir / "Pipfile",
-            repo_project_dir / "Pipfile"
+        # 按照优先级顺序查找依赖文件，每种类型只取第一个找到的
+        dependency_types = [
+            ("requirements.txt", [project_dir / "requirements.txt", repo_project_dir / "requirements.txt"]),
+            ("pyproject.toml", [project_dir / "pyproject.toml", repo_project_dir / "pyproject.toml"]),
+            ("package.json", [project_dir / "package.json", repo_project_dir / "package.json"]),
+            ("Pipfile", [project_dir / "Pipfile", repo_project_dir / "Pipfile"])
         ]
         
         hashes = {}
-        for dep_file in dependency_files:
-            if dep_file.exists():
-                file_hash = self.calculate_file_hash(dep_file)
-                if file_hash:
-                    hashes[str(dep_file)] = file_hash
+        for dep_type, possible_files in dependency_types:
+            for dep_file in possible_files:
+                if dep_file.exists():
+                    file_hash = self.calculate_file_hash(dep_file)
+                    if file_hash:
+                        # 使用文件类型作为键，而不是完整路径，避免重复跟踪
+                        hashes[dep_type] = {
+                            "path": str(dep_file),
+                            "hash": file_hash
+                        }
+                    break  # 找到第一个存在的文件后就停止查找这种类型
         
         return hashes
     
@@ -92,6 +100,7 @@ class QingLongVenvManager:
         
         # 如果信息文件不存在，认为需要重新安装
         if not info_file.exists():
+            self.log("虚拟环境信息文件不存在，需要创建虚拟环境", "DEBUG")
             return True
         
         try:
@@ -104,27 +113,43 @@ class QingLongVenvManager:
             # 获取当前的哈希值
             current_hashes = self.get_dependency_hashes(project_dir, repo_project_dir)
             
-            # 比较哈希值
-            if old_hashes != current_hashes:
-                self.log("检测到依赖文件发生变化", "INFO")
-                
-                # 显示变化的文件
-                all_files = set(old_hashes.keys()) | set(current_hashes.keys())
-                for file_path in all_files:
-                    old_hash = old_hashes.get(file_path, "")
-                    new_hash = current_hashes.get(file_path, "")
-                    
-                    if old_hash != new_hash:
-                        if not old_hash:
-                            self.log(f"  新增文件: {file_path}", "INFO")
-                        elif not new_hash:
-                            self.log(f"  删除文件: {file_path}", "INFO")
-                        else:
-                            self.log(f"  修改文件: {file_path}", "INFO")
-                
-                return True
+            # 调试信息
+            self.log(f"旧哈希值: {old_hashes}", "DEBUG")
+            self.log(f"当前哈希值: {current_hashes}", "DEBUG")
             
-            return False
+            # 比较哈希值
+            changed = False
+            changed_files = []
+            
+            # 检查所有依赖类型
+            all_types = set(old_hashes.keys()) | set(current_hashes.keys())
+            for dep_type in all_types:
+                old_info = old_hashes.get(dep_type, {})
+                current_info = current_hashes.get(dep_type, {})
+                
+                old_hash = old_info.get("hash", "") if isinstance(old_info, dict) else old_info
+                current_hash = current_info.get("hash", "") if isinstance(current_info, dict) else current_info
+                
+                if old_hash != current_hash:
+                    changed = True
+                    current_path = current_info.get("path", dep_type) if isinstance(current_info, dict) else dep_type
+                    old_path = old_info.get("path", dep_type) if isinstance(old_info, dict) else dep_type
+                    
+                    if not old_hash:
+                        changed_files.append(f"  新增文件: {current_path}")
+                    elif not current_hash:
+                        changed_files.append(f"  删除文件: {old_path}")
+                    else:
+                        changed_files.append(f"  修改文件: {current_path}")
+            
+            if changed:
+                self.log("检测到依赖文件发生变化", "INFO")
+                for change in changed_files:
+                    self.log(change, "INFO")
+                return True
+            else:
+                self.log("依赖文件未发生变化", "DEBUG")
+                return False
             
         except Exception as e:
             self.log(f"检查依赖变化失败: {e}", "WARNING")
@@ -789,6 +814,9 @@ def main():
   # 强制重建虚拟环境
   python3 qinglong_venv_manager.py create my_project --force
   
+  # 开启调试模式查看详细信息
+  python3 qinglong_venv_manager.py create my_project --debug
+  
   # 列出所有虚拟环境
   python3 qinglong_venv_manager.py list
   
@@ -802,6 +830,9 @@ def main():
   python3 qinglong_venv_manager.py activate my_project
         """
     )
+    
+    # 全局选项
+    parser.add_argument('--debug', action='store_true', help='开启调试模式，显示详细信息')
     
     subparsers = parser.add_subparsers(dest='command', help='可用命令')
     
@@ -825,13 +856,17 @@ def main():
     activate_parser = subparsers.add_parser('activate', help='显示虚拟环境激活命令')
     activate_parser.add_argument('project', help='项目名称')
     
+    # check 命令
+    check_parser = subparsers.add_parser('check', help='检查依赖文件是否发生变化')
+    check_parser.add_argument('project', help='项目名称')
+    
     args = parser.parse_args()
     
     if not args.command:
         parser.print_help()
         return
     
-    manager = QingLongVenvManager()
+    manager = QingLongVenvManager(debug=args.debug)
     
     try:
         if args.command == 'create':
@@ -850,6 +885,15 @@ def main():
             
         elif args.command == 'activate':
             manager.activate_venv_command(args.project)
+            
+        elif args.command == 'check':
+            changed = manager.check_dependencies_changed(args.project)
+            if changed:
+                manager.log(f"项目 {args.project} 的依赖文件已发生变化", "INFO")
+                sys.exit(1)
+            else:
+                manager.log(f"项目 {args.project} 的依赖文件未发生变化", "SUCCESS")
+                sys.exit(0)
             
     except KeyboardInterrupt:
         manager.log("操作被用户中断", "WARNING")
