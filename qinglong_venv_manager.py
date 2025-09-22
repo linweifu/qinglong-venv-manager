@@ -13,6 +13,7 @@ import subprocess
 import json
 import argparse
 import shutil
+import hashlib
 from datetime import datetime
 from pathlib import Path
 from typing import List, Dict, Optional, Tuple
@@ -50,6 +51,84 @@ class QingLongVenvManager:
         
         color = color_map.get(level, Colors.NC)
         print(f"{color}[{timestamp}] [{level}]{Colors.NC} {message}")
+    
+    def calculate_file_hash(self, file_path: Path) -> str:
+        """计算文件的 MD5 哈希值"""
+        try:
+            with open(file_path, 'rb') as f:
+                content = f.read()
+            return hashlib.md5(content).hexdigest()
+        except Exception as e:
+            self.log(f"计算文件哈希失败 {file_path}: {e}", "WARNING")
+            return ""
+    
+    def get_dependency_hashes(self, project_dir: Path, repo_project_dir: Path) -> Dict[str, str]:
+        """获取所有依赖文件的哈希值"""
+        dependency_files = [
+            project_dir / "requirements.txt",
+            repo_project_dir / "requirements.txt",
+            project_dir / "pyproject.toml",
+            repo_project_dir / "pyproject.toml",
+            project_dir / "package.json",
+            repo_project_dir / "package.json",
+            project_dir / "Pipfile",
+            repo_project_dir / "Pipfile"
+        ]
+        
+        hashes = {}
+        for dep_file in dependency_files:
+            if dep_file.exists():
+                file_hash = self.calculate_file_hash(dep_file)
+                if file_hash:
+                    hashes[str(dep_file)] = file_hash
+        
+        return hashes
+    
+    def check_dependencies_changed(self, project_name: str) -> bool:
+        """检查依赖文件是否发生变化"""
+        project_dir = Path(self.scripts_dir) / project_name
+        repo_project_dir = Path(self.repo_dir) / project_name
+        info_file = project_dir / ".venv_info.json"
+        
+        # 如果信息文件不存在，认为需要重新安装
+        if not info_file.exists():
+            return True
+        
+        try:
+            # 读取上次记录的哈希值
+            with open(info_file, 'r', encoding='utf-8') as f:
+                info_data = json.load(f)
+            
+            old_hashes = info_data.get("dependency_hashes", {})
+            
+            # 获取当前的哈希值
+            current_hashes = self.get_dependency_hashes(project_dir, repo_project_dir)
+            
+            # 比较哈希值
+            if old_hashes != current_hashes:
+                self.log("检测到依赖文件发生变化", "INFO")
+                
+                # 显示变化的文件
+                all_files = set(old_hashes.keys()) | set(current_hashes.keys())
+                for file_path in all_files:
+                    old_hash = old_hashes.get(file_path, "")
+                    new_hash = current_hashes.get(file_path, "")
+                    
+                    if old_hash != new_hash:
+                        if not old_hash:
+                            self.log(f"  新增文件: {file_path}", "INFO")
+                        elif not new_hash:
+                            self.log(f"  删除文件: {file_path}", "INFO")
+                        else:
+                            self.log(f"  修改文件: {file_path}", "INFO")
+                
+                return True
+            
+            return False
+            
+        except Exception as e:
+            self.log(f"检查依赖变化失败: {e}", "WARNING")
+            return True  # 出错时重新安装
     
     def detect_project_type(self, project_dir: str) -> Dict[str, any]:
         """检测项目类型和依赖文件"""
@@ -91,40 +170,50 @@ class QingLongVenvManager:
             return False
         
         # 检查虚拟环境是否已存在
-        if venv_dir.exists():
-            if not force:
-                self.log(f"虚拟环境已存在: {venv_dir}", "WARNING")
+        venv_exists = venv_dir.exists()
+        dependencies_changed = self.check_dependencies_changed(project_name)
+        
+        if venv_exists:
+            if not force and not dependencies_changed:
+                self.log(f"虚拟环境已存在且依赖未变化: {venv_dir}", "INFO")
                 return True
-            else:
+            elif dependencies_changed:
+                self.log("依赖文件已更新，重新安装依赖...", "INFO")
+                # 不删除虚拟环境，只重新安装依赖
+            elif force:
                 self.log("强制重建虚拟环境，删除现有环境...", "WARNING")
                 shutil.rmtree(venv_dir)
+                venv_exists = False
         
         try:
-            # 创建虚拟环境
-            self.log("创建 Python 虚拟环境...")
-            result = subprocess.run([
-                sys.executable, "-m", "venv", str(venv_dir)
-            ], capture_output=True, text=True, timeout=300)
+            # 只有在虚拟环境不存在时才创建
+            if not venv_exists:
+                self.log("创建 Python 虚拟环境...")
+                result = subprocess.run([
+                    sys.executable, "-m", "venv", str(venv_dir)
+                ], capture_output=True, text=True, timeout=300)
+                
+                if result.returncode != 0:
+                    self.log(f"虚拟环境创建失败: {result.stderr}", "ERROR")
+                    return False
+                
+                self.log("✅ Python 虚拟环境创建成功", "SUCCESS")
+                
+                # 升级 pip
+                pip_path = venv_dir / "bin" / "pip"
+                self.log("升级 pip...")
+                subprocess.run([
+                    str(pip_path), "install", "--upgrade", "pip",
+                    "-i", "https://pypi.tuna.tsinghua.edu.cn/simple"
+                ], capture_output=True, text=True, timeout=120)
+            else:
+                self.log("✅ Python 虚拟环境已存在", "SUCCESS")
             
-            if result.returncode != 0:
-                self.log(f"虚拟环境创建失败: {result.stderr}", "ERROR")
-                return False
+            # 安装或更新依赖（无论虚拟环境是否新建都执行）
+            self._install_python_dependencies(project_name, venv_dir, project_dir, repo_project_dir, force_reinstall=dependencies_changed or force)
             
-            self.log("✅ Python 虚拟环境创建成功", "SUCCESS")
-            
-            # 升级 pip
-            pip_path = venv_dir / "bin" / "pip"
-            self.log("升级 pip...")
-            subprocess.run([
-                str(pip_path), "install", "--upgrade", "pip",
-                "-i", "https://pypi.tuna.tsinghua.edu.cn/simple"
-            ], capture_output=True, text=True, timeout=120)
-            
-            # 查找并安装依赖
-            self._install_python_dependencies(project_name, venv_dir, project_dir, repo_project_dir)
-            
-            # 创建虚拟环境信息文件
-            self._create_venv_info(project_name, venv_dir, project_dir)
+            # 创建或更新虚拟环境信息文件
+            self._create_venv_info(project_name, venv_dir, project_dir, repo_project_dir)
             
             return True
             
@@ -136,7 +225,7 @@ class QingLongVenvManager:
             return False
     
     def _install_python_dependencies(self, project_name: str, venv_dir: Path, 
-                                   project_dir: Path, repo_project_dir: Path):
+                                   project_dir: Path, repo_project_dir: Path, force_reinstall: bool = False):
         """安装 Python 依赖"""
         pip_path = venv_dir / "bin" / "pip"
         
@@ -167,12 +256,19 @@ class QingLongVenvManager:
                             self.log("requirements.txt 文件为空或只包含注释", "WARNING")
                             continue
                         
-                        self.log("安装 requirements.txt 依赖...")
-                        result = subprocess.run([
+                        install_cmd = [
                             str(pip_path), "install", "-r", str(dep_file),
                             "-i", "https://pypi.tuna.tsinghua.edu.cn/simple",
                             "--timeout", "300"
-                        ], capture_output=True, text=True, timeout=600)
+                        ]
+                        
+                        if force_reinstall:
+                            install_cmd.append("--force-reinstall")
+                            self.log("强制重新安装 requirements.txt 依赖...")
+                        else:
+                            self.log("安装 requirements.txt 依赖...")
+                        
+                        result = subprocess.run(install_cmd, capture_output=True, text=True, timeout=600)
                         
                     elif dep_type == "pyproject.toml":
                         self.log("安装 pyproject.toml 项目...")
@@ -204,7 +300,7 @@ class QingLongVenvManager:
         if not installed:
             self.log("未找到有效的依赖文件或安装失败", "WARNING")
     
-    def _create_venv_info(self, project_name: str, venv_dir: Path, project_dir: Path):
+    def _create_venv_info(self, project_name: str, venv_dir: Path, project_dir: Path, repo_project_dir: Path = None):
         """创建虚拟环境信息文件"""
         try:
             # 获取 Python 版本
@@ -219,6 +315,22 @@ class QingLongVenvManager:
                                   capture_output=True, text=True)
             packages = [line for line in result.stdout.split('\n') if line.strip()]
             
+            # 获取依赖文件哈希值
+            if repo_project_dir is None:
+                repo_project_dir = Path(self.repo_dir) / project_name
+            dependency_hashes = self.get_dependency_hashes(project_dir, repo_project_dir)
+            
+            # 读取现有信息文件以保留创建时间
+            info_file = project_dir / ".venv_info.json"
+            created_at = datetime.now().isoformat()
+            if info_file.exists():
+                try:
+                    with open(info_file, 'r', encoding='utf-8') as f:
+                        existing_info = json.load(f)
+                    created_at = existing_info.get("created_at", created_at)
+                except:
+                    pass
+            
             venv_info = {
                 "project_name": project_name,
                 "project_dir": str(project_dir),
@@ -228,7 +340,9 @@ class QingLongVenvManager:
                 "site_packages": str(venv_dir / "lib" / "python3.11" / "site-packages"),
                 "python_version": python_version,
                 "package_count": len(packages),
-                "created_at": datetime.now().isoformat(),
+                "dependency_hashes": dependency_hashes,
+                "last_updated": datetime.now().isoformat(),
+                "created_at": created_at,
                 "manager": "qinglong_venv_manager"
             }
             
@@ -254,14 +368,23 @@ class QingLongVenvManager:
             self.log(f"项目目录不存在: {project_dir}", "ERROR")
             return False
         
-        # 检查 node_modules 是否已存在
-        if node_modules_dir.exists():
-            if not force:
-                self.log(f"Node.js 环境已存在: {node_modules_dir}", "WARNING")
+        # 检查 Node.js 环境是否已存在
+        nodejs_exists = node_modules_dir.exists()
+        dependencies_changed = self.check_dependencies_changed(project_name)
+        
+        if nodejs_exists:
+            if not force and not dependencies_changed:
+                self.log(f"Node.js 环境已存在且依赖未变化: {node_modules_dir}", "INFO")
                 return True
-            else:
+            elif dependencies_changed:
+                self.log("package.json 已更新，重新安装依赖...", "INFO")
+                # 删除 node_modules 以确保完全重新安装
+                shutil.rmtree(node_modules_dir)
+                nodejs_exists = False
+            elif force:
                 self.log("强制重建 Node.js 环境，删除现有环境...", "WARNING")
                 shutil.rmtree(node_modules_dir)
+                nodejs_exists = False
         
         # 查找 package.json
         package_files = [
